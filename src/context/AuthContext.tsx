@@ -1,6 +1,8 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { User } from '../types';
-import { dataService } from '../services/dataService';
+import { firebaseService } from '../services/firebaseService';
+import { onAuthStateChanged } from 'firebase/auth';
+import { auth } from '../config/firebase';
 
 interface RegisterData {
   name: string;
@@ -37,32 +39,28 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    // Check for existing session
-    const savedUser = localStorage.getItem('currentUser');
-    if (savedUser) {
-      try {
-        const parsedUser = JSON.parse(savedUser);
-        setUser(parsedUser);
-        
-        // Update user as active in the system
-        const systemUser = dataService.getUser(parsedUser.email);
-        if (systemUser) {
-          systemUser.isActive = true;
-          dataService.updateUser(systemUser);
+    // Listen for authentication state changes
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        // Get user data from Firestore
+        const userData = await firebaseService.getUser(firebaseUser.uid);
+        if (userData) {
+          setUser(userData);
+          // Create login session
+          await firebaseService.createLoginSession(userData);
         }
-      } catch (error) {
-        console.error('Error loading saved user:', error);
-        localStorage.removeItem('currentUser');
+      } else {
+        setUser(null);
       }
-    }
-    setIsLoading(false);
+      setIsLoading(false);
+    });
+
+    return () => unsubscribe();
   }, []);
 
   const login = async (email: string, password: string): Promise<boolean> => {
-    const authenticatedUser = dataService.authenticateUser(email, password);
+    const authenticatedUser = await firebaseService.signIn(email, password);
     if (authenticatedUser) {
-      setUser(authenticatedUser);
-      localStorage.setItem('currentUser', JSON.stringify(authenticatedUser));
       return true;
     }
     return false;
@@ -70,49 +68,34 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
   const register = async (data: RegisterData): Promise<boolean> => {
     try {
-      // Check if user already exists
-      const existingUser = dataService.getUser(data.email);
+      const existingUser = await firebaseService.getUserByEmail(data.email);
       if (existingUser) {
         return false;
       }
 
-      // Create new user
-      const newUser: User = {
-        id: `user-${Date.now()}`,
+      // Create new user with Firebase Auth and Firestore
+      const newUser = await firebaseService.signUp(data.email, data.password, {
         name: data.name,
-        email: data.email,
         rollNo: data.rollNumber,
         mobile: data.mobile,
-        role: 'student',
-        registeredAt: new Date().toISOString(),
-        loginCount: 1,
-        isActive: true,
-        lastLoginAt: new Date().toISOString()
-      };
-
-      // Save user and create login session
-      dataService.addUser(newUser);
-      dataService.createLoginSession(newUser);
-      
-      // Store password (in production, this would be hashed)
-      dataService.setUserPassword(data.email, data.password);
-
-      // Set as current user
-      setUser(newUser);
-      localStorage.setItem('currentUser', JSON.stringify(newUser));
-
-      // Add welcome notification
-      dataService.addNotification({
-        id: `notif-${Date.now()}`,
-        userId: newUser.id,
-        title: 'Welcome to Isaac Asimov Lab! 🎉',
-        message: 'Your account has been created successfully. You can now request components for your robotics projects.',
-        type: 'success',
-        read: false,
-        createdAt: new Date().toISOString(),
+        role: 'student'
       });
 
-      return true;
+      if (newUser) {
+        // Add welcome notification
+        await firebaseService.addNotification({
+          id: `notif-${Date.now()}`,
+          userId: newUser.id,
+          title: 'Welcome to Isaac Asimov Lab! 🎉',
+          message: 'Your account has been created successfully. You can now request components for your robotics projects.',
+          type: 'success',
+          read: false,
+          createdAt: new Date().toISOString(),
+        });
+
+        return true;
+      }
+      return false;
     } catch (error) {
       console.error('Registration error:', error);
       return false;
@@ -121,11 +104,10 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
   const logout = () => {
     if (user) {
-      // End login session
-      dataService.endLoginSession(user.id);
+      // End login session and sign out
+      firebaseService.endLoginSession(user.id);
+      firebaseService.signOut();
     }
-    setUser(null);
-    localStorage.removeItem('currentUser');
   };
 
   return (
